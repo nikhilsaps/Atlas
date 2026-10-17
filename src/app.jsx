@@ -3,7 +3,7 @@ import React, { useState, useEffect, useMemo } from "react";
 /* ================= data store ================= */
 const KEY = "atlas.data.v1", OLD_KEY = "codex.data.v1", THEME_KEY = "atlas.theme";
 const blank = { anime:[], manga:[], movies:[], games:[], finance:{accounts:[],txns:[]},
-  investments:[], todos:[], ideas:[], mllog:[] };
+  investments:[], todos:[], ideas:[], mllog:[], settings:{tmdbKey:"",rawgKey:""} };
 function migrateAnime(a){
   const map={Plan:"towatch",Watching:"watching",Completed:"watched",Dropped:"towatch"};
   return { mal:a.mal, title:a.title, image:a.image||a.cover, score:a.score, year:a.year,
@@ -16,6 +16,7 @@ function load(){ try{
     if(raw==null){ const old=localStorage.getItem(OLD_KEY); if(old!=null){ raw=old; localStorage.setItem(KEY,old); } }
     const d={...structuredClone(blank), ...JSON.parse(raw||"{}")};
     d.finance={accounts:[],txns:[],...(d.finance||{})};
+    d.settings={tmdbKey:"",rawgKey:"",...(d.settings||{})};
     d.anime=(d.anime||[]).map(migrateAnime);
     return d;
   }catch(e){ return structuredClone(blank); } }
@@ -42,24 +43,88 @@ function goalSIP(t,rate,yrs){ const i=rate/1200,n=yrs*12; if(i===0)return t/n; r
 function futureCost(c,infl,yrs){ return c*Math.pow(1+infl/100,yrs); }
 const n = v => (v===""||v==null||isNaN(v))?0:Number(v);
 
-/* ================= Jikan (MyAnimeList) ================= */
-const J = "https://api.jikan.moe/v4";
-async function jget(path){ const r=await fetch(J+path); if(!r.ok) throw new Error("HTTP "+r.status); return r.json(); }
-function mapAnime(x){ return {
-  mal:x.mal_id, title:x.title_english||x.title,
-  image:x.images?.jpg?.large_image_url||x.images?.jpg?.image_url,
-  score:x.score, year:x.year||x.aired?.prop?.from?.year, type:x.type, episodes:x.episodes,
-  genres:(x.genres||[]).map(g=>g.name), synopsis:x.synopsis }; }
-async function fetchTop(page=1){ return (await jget(`/top/anime?page=${page}&limit=24`)).data.map(mapAnime); }
-async function fetchSeason(){ return (await jget(`/seasons/now?limit=24&sfw`)).data.map(mapAnime); }
-async function fetchSearch(q){ return (await jget(`/anime?q=${encodeURIComponent(q)}&limit=24&sfw&order_by=members&sort=desc`)).data.map(mapAnime); }
-async function fetchFull(mal){ return mapAnime((await jget(`/anime/${mal}/full`)).data); }
-async function fetchEpisodes(mal){ return ((await jget(`/anime/${mal}/episodes`)).data||[])
-  .map(e=>({num:e.mal_id, title:e.title||e.title_romanji, aired:e.aired, filler:e.filler, recap:e.recap})); }
-async function searchManga(q){ return (await jget(`/manga?q=${encodeURIComponent(q)}&limit=12&sfw`)).data
-  .map(x=>({ mal:x.mal_id, title:x.title_english||x.title, cover:x.images?.jpg?.image_url, score:x.score,
-    year:x.published?.prop?.from?.year, count:x.chapters, type:x.type,
-    genres:(x.genres||[]).map(g=>g.name).slice(0,3), synopsis:x.synopsis })); }
+/* ================= remote data (AniList / TMDB / RAWG) ================= */
+async function tfetch(url, opts={}, ms=12000){
+  const c = new AbortController(); const t = setTimeout(()=>c.abort(), ms);
+  try{ return await fetch(url, {...opts, signal:c.signal}); }
+  finally{ clearTimeout(t); }
+}
+
+/* ---- AniList (anime + manga), no API key ---- */
+const ANILIST = "https://graphql.anilist.co";
+const MEDIA_FIELDS = `id title{english romaji native} coverImage{extraLarge large} averageScore seasonYear startDate{year} format episodes genres description(asHtml:false)`;
+async function alQuery(query, variables){
+  const r = await tfetch(ANILIST, { method:"POST",
+    headers:{"Content-Type":"application/json","Accept":"application/json"},
+    body: JSON.stringify({query, variables}) });
+  if(!r.ok) throw new Error("HTTP "+r.status);
+  const j = await r.json();
+  if(j.errors) throw new Error(j.errors[0]?.message||"AniList error");
+  return j.data;
+}
+function stripHtml(s){ return (s||"").replace(/<br\s*\/?>/gi,"\n").replace(/<[^>]+>/g,"").trim(); }
+function mapAnime(m){ return {
+  mal: m.id, title: m.title?.english||m.title?.romaji||m.title?.native||"Untitled",
+  image: m.coverImage?.extraLarge||m.coverImage?.large,
+  score: m.averageScore!=null ? +(m.averageScore/10).toFixed(1) : null,
+  year: m.seasonYear||m.startDate?.year, type: m.format, episodes: m.episodes,
+  genres: m.genres||[], synopsis: stripHtml(m.description) }; }
+function curSeason(){ const m=new Date().getMonth(), y=new Date().getFullYear();
+  if(m===11) return {season:"WINTER", year:y+1};
+  if(m<=1) return {season:"WINTER", year:y};
+  if(m<=4) return {season:"SPRING", year:y};
+  if(m<=7) return {season:"SUMMER", year:y};
+  return {season:"FALL", year:y}; }
+async function fetchTop(){
+  const d=await alQuery(`query{Page(perPage:24){media(type:ANIME,sort:SCORE_DESC){${MEDIA_FIELDS}}}}`,{});
+  return d.Page.media.map(mapAnime); }
+async function fetchSeason(){ const {season,year}=curSeason();
+  const d=await alQuery(`query($s:MediaSeason,$y:Int){Page(perPage:24){media(type:ANIME,season:$s,seasonYear:$y,sort:POPULARITY_DESC){${MEDIA_FIELDS}}}}`,{s:season,y:year});
+  return d.Page.media.map(mapAnime); }
+async function fetchSearch(q){
+  const d=await alQuery(`query($q:String){Page(perPage:24){media(type:ANIME,search:$q,sort:SEARCH_MATCH){${MEDIA_FIELDS}}}}`,{q});
+  return d.Page.media.map(mapAnime); }
+async function fetchFull(id){
+  const d=await alQuery(`query($id:Int){Media(id:$id,type:ANIME){${MEDIA_FIELDS} duration status}}`,{id});
+  return mapAnime(d.Media); }
+async function fetchEpisodes(id){
+  const d=await alQuery(`query($id:Int){Media(id:$id,type:ANIME){episodes nextAiringEpisode{episode} streamingEpisodes{title thumbnail}}}`,{id});
+  const m=d.Media, se=m.streamingEpisodes||[];
+  const total=m.episodes||(m.nextAiringEpisode?m.nextAiringEpisode.episode-1:0);
+  if(total>0) return Array.from({length:total},(_,i)=>({num:i+1, title:se[i]?.title||null}));
+  return se.map((e,i)=>({num:i+1, title:e.title})); }
+async function searchManga(q){
+  const d=await alQuery(`query($q:String){Page(perPage:12){media(type:MANGA,search:$q,sort:SEARCH_MATCH){id title{english romaji native} coverImage{large} averageScore startDate{year} chapters format genres description(asHtml:false)}}}`,{q});
+  return d.Page.media.map(x=>({ mal:x.id, title:x.title?.english||x.title?.romaji||x.title?.native,
+    cover:x.coverImage?.large, score:x.averageScore!=null?+(x.averageScore/10).toFixed(1):null,
+    year:x.startDate?.year, count:x.chapters, type:x.format,
+    genres:(x.genres||[]).slice(0,3), synopsis:stripHtml(x.description) })); }
+
+/* ---- TMDB (movies + TV), needs free api key ---- */
+const TMDB="https://api.themoviedb.org/3", TMDBIMG="https://image.tmdb.org/t/p/w500";
+async function tmdb(path, key){ if(!key) throw new Error("NO_KEY");
+  const sep=path.includes("?")?"&":"?";
+  const r=await tfetch(`${TMDB}${path}${sep}api_key=${key}`);
+  if(r.status===401) throw new Error("BAD_KEY");
+  if(!r.ok) throw new Error("HTTP "+r.status); return r.json(); }
+function mapScreen(x, kind){ const k=kind||(x.title?"movie":"tv"); return {
+  tid:x.id, kind:k, title:x.title||x.name,
+  image:x.poster_path?TMDBIMG+x.poster_path:null,
+  score:x.vote_average?+x.vote_average.toFixed(1):null,
+  year:(x.release_date||x.first_air_date||"").slice(0,4),
+  overview:x.overview, genres:(x.genres||[]).map(g=>g.name) }; }
+
+/* ---- RAWG (games), needs free api key ---- */
+const RAWG="https://api.rawg.io/api";
+async function rawg(path, key){ if(!key) throw new Error("NO_KEY");
+  const sep=path.includes("?")?"&":"?";
+  const r=await tfetch(`${RAWG}${path}${sep}key=${key}`);
+  if(r.status===401) throw new Error("BAD_KEY");
+  if(!r.ok) throw new Error("HTTP "+r.status); return r.json(); }
+function mapGame(x){ return { gid:x.id, title:x.name, image:x.background_image,
+  score:x.rating?+x.rating.toFixed(1):null, metacritic:x.metacritic,
+  year:(x.released||"").slice(0,4), genres:(x.genres||[]).map(g=>g.name),
+  platforms:(x.platforms||[]).map(p=>p.platform.name) }; }
 
 /* ================= nav ================= */
 const NAV = [
@@ -76,6 +141,7 @@ const NAV = [
     {id:"todos", ic:"\u2713", name:"To-do & Plan"},
     {id:"ideas", ic:"\u2605", name:"Ideas"},
     {id:"mllog", ic:"\u2699", name:"ML Research"},
+    {id:"settings", ic:"\u2692", name:"Settings"},
   ]},
 ];
 
@@ -132,7 +198,7 @@ function AnimeBrowse({data, onOpen}){
       if(which==="top") setList(await fetchTop());
       else if(which==="season") setList(await fetchSeason());
       else setList(await fetchSearch(query));
-    }catch(ex){ setErr("Couldn't reach MyAnimeList (need internet to browse)."); }
+    }catch(ex){ setErr("Couldn't reach AniList (need internet to browse)."); }
     setBusy(false);
   };
   useEffect(()=>{ run("season"); },[]);
@@ -150,7 +216,7 @@ function AnimeBrowse({data, onOpen}){
       </form>
     </div>
     {err && <div className="empty">{err}</div>}
-    {busy ? <div className="spin">Loading from MyAnimeList...</div>
+    {busy ? <div className="spin">Loading from AniList...</div>
       : <div className="media">{list.map(a=>{ const t=tracked.get(a.mal);
           return (<div className="mcard" key={a.mal} onClick={()=>onOpen(a)} title={a.title}>
             <div className="cover" style={{backgroundImage:`url(${a.image||""})`}}>
@@ -246,7 +312,7 @@ function AnimeDetail({mal, data, update, onClose}){
         <div className="syn">{full.synopsis||"No synopsis."}</div>
         <h3 style={{margin:"18px 0 0"}}>Episodes</h3>
         {eps===null ? <div className="spin">Loading episodes...</div>
-          : eps.length===0 ? <div className="sub" style={{marginTop:8}}>{epErr||"No episode list on MyAnimeList."}</div>
+          : eps.length===0 ? <div className="sub" style={{marginTop:8}}>{epErr||"No episode list for this title."}</div>
           : <div className="eplist">{eps.map(e=>(
               <div className={"ep"+(e.num<=progress?" seen":"")} key={e.num}
                 onClick={()=>setProgress(e.num)} title="Click to mark watched up to here">
@@ -256,8 +322,7 @@ function AnimeDetail({mal, data, update, onClose}){
                   {e.aired && <div className="ed">{String(e.aired).slice(0,10)}</div>}</div>
                 <span className="sub">{e.num<=progress?"watched":""}</span>
               </div>))}</div>}
-        {eps && eps.length>0 && <div className="sub" style={{marginTop:6}}>MyAnimeList gives episode titles and
-          air dates; per-episode descriptions are rarely available there.</div>}
+        {eps && eps.length>0 && <div className="sub" style={{marginTop:6}}>AniList provides episode counts and titles where available; air dates and filler flags are not tracked.</div>}
       </div>
     </div>
   </div>);
@@ -359,7 +424,7 @@ function MangaSearch({onClose, onAdd}){
           <input style={{flex:1}} autoFocus placeholder="Search manga by title..." value={q}
             onChange={e=>setQ(e.target.value)}/>
           <button disabled={busy}>{busy?"Searching...":"Search"}</button></form>
-        <div className="sub" style={{margin:"10px 2px"}}>Metadata from Jikan (MyAnimeList).
+        <div className="sub" style={{margin:"10px 2px"}}>Metadata from AniList.
           {err && <span style={{color:"var(--destructive,#f87171)"}}> {err}</span>}</div>
         {res.map(x=>(
           <div className="sr" key={x.mal}><img src={x.cover} alt=""/>
@@ -567,6 +632,404 @@ function Soon({label, note}){
     <div className="empty">{note}</div></div>);
 }
 
+
+/* ================= MOVIES & TV (TMDB) ================= */
+const S_STATUS=[["towatch","To watch"],["watching","Watching"],["watched","Watched"]];
+const sName=s=>(S_STATUS.find(x=>x[0]===s)||[,"\u2014"])[1];
+function MoviesModule({data,update}){
+  const [tab,setTab]=useState("browse");
+  const [detail,setDetail]=useState(null);
+  const key=data.settings.tmdbKey;
+  return (<div>
+    <Head title="Movies & TV" sub="Browse films and series, track what you watch, rate them."/>
+    <Tabs tabs={[["browse","Browse"],["library","My library ("+data.movies.length+")"]]} tab={tab} set={setTab}/>
+    {!key && <div className="empty">Add a free <b>TMDB</b> API key in <b>Settings</b> to browse. Your saved library still works without it.</div>}
+    {tab==="browse" && <ScreenBrowse data={data} apiKey={key} onOpen={setDetail}/>}
+    {tab==="library" && <ScreenLibrary data={data} onOpen={setDetail}/>}
+    {detail && <ScreenDetail item={detail} data={data} update={update} apiKey={key} onClose={()=>setDetail(null)}/>}
+  </div>);
+}
+function ScreenBrowse({data,apiKey,onOpen}){
+  const [src,setSrc]=useState("movie");
+  const [q,setQ]=useState(""); const [list,setList]=useState([]);
+  const [busy,setBusy]=useState(false); const [err,setErr]=useState("");
+  const run=async(which,query)=>{ if(!apiKey){setErr("Add a TMDB key in Settings.");return;}
+    setBusy(true);setErr("");setList([]);
+    try{ let d;
+      if(which==="movie") d=await tmdb("/movie/popular",apiKey);
+      else if(which==="tv") d=await tmdb("/tv/popular",apiKey);
+      else d=await tmdb("/search/multi?query="+encodeURIComponent(query),apiKey);
+      const items=(d.results||[]).filter(x=>x.media_type!=="person").map(x=>mapScreen(x,which==="search"?null:which));
+      setList(items.filter(x=>x.image));
+    }catch(ex){ setErr(ex.message==="BAD_KEY"?"That TMDB key was rejected (check Settings).":"Couldn't reach TMDB."); }
+    setBusy(false); };
+  useEffect(()=>{ if(apiKey) run("movie"); },[apiKey]);
+  const tracked=useMemo(()=>new Map(data.movies.map(m=>[m.kind+m.tid,m])),[data.movies]);
+  const pick=s=>{setSrc(s); run(s);};
+  const doSearch=e=>{e.preventDefault(); if(!q.trim())return; setSrc("search"); run("search",q);};
+  return (<div>
+    <div className="chips">
+      <button className={"small"+(src==="movie"?"":" outline")} onClick={()=>pick("movie")}>Popular movies</button>
+      <button className={"small"+(src==="tv"?"":" outline")} onClick={()=>pick("tv")}>Popular TV</button>
+      <form onSubmit={doSearch} className="row" style={{flex:1,minWidth:220}}>
+        <input style={{flex:1}} placeholder="Search movies & TV..." value={q} onChange={e=>setQ(e.target.value)}/>
+        <button className="small">Search</button></form>
+    </div>
+    {err && <div className="empty">{err}</div>}
+    {busy ? <div className="spin">Loading from TMDB...</div>
+      : <div className="media">{list.map(a=>{ const t=tracked.get(a.kind+a.tid);
+          return (<div className="mcard" key={a.kind+a.tid} onClick={()=>onOpen(a)} title={a.title}>
+            <div className="cover" style={{backgroundImage:`url(${a.image||""})`}}>
+              {t && <span className="st">{sName(t.status)}</span>}
+              {a.score?<span className="sc">{"\u2605 "+a.score}</span>:null}
+              <span className="rk">{a.kind==="tv"?"TV":"Film"}</span>
+            </div>
+            <div className="b"><div className="t">{a.title}</div>
+              <div className="m">{[a.year,a.kind==="tv"?"Series":"Movie"].filter(Boolean).join(DOT)}</div></div>
+          </div>); })}</div>}
+  </div>);
+}
+function ScreenLibrary({data,onOpen}){
+  const [status,setStatus]=useState("all");
+  let list=data.movies; if(status!=="all") list=list.filter(m=>m.status===status);
+  const counts=Object.fromEntries(S_STATUS.map(([s])=>[s,data.movies.filter(m=>m.status===s).length]));
+  return (<div>
+    <div className="chips">
+      <button className={"small"+(status==="all"?"":" outline")} onClick={()=>setStatus("all")}>All ({data.movies.length})</button>
+      {S_STATUS.map(([s,label])=>(<button key={s} className={"small"+(status===s?"":" outline")} onClick={()=>setStatus(s)}>{label} ({counts[s]})</button>))}
+    </div>
+    {list.length===0 ? <div className="empty">Nothing saved yet. Open <b>Browse</b> and add a film or series.</div>
+      : <div className="media">{list.map(a=>(
+          <div className="mcard" key={a.kind+a.tid} onClick={()=>onOpen(a)} title={a.title}>
+            <div className="cover" style={{backgroundImage:`url(${a.image||""})`}}>
+              <span className="st">{sName(a.status)}</span>
+              {a.rating?<span className="sc">{"\u2605 "+a.rating}</span>:null}
+              <span className="rk">{a.kind==="tv"?"TV":"Film"}</span></div>
+            <div className="b"><div className="t">{a.title}</div>
+              <div className="m">{[a.year,a.kind==="tv"&&a.progress>0&&("ep "+a.progress)].filter(Boolean).join(DOT)}</div></div>
+          </div>))}</div>}
+  </div>);
+}
+function ScreenDetail({item,data,update,apiKey,onClose}){
+  const [full,setFull]=useState(item);
+  useEffect(()=>{ let ok=true;
+    if(apiKey) tmdb("/"+item.kind+"/"+item.tid,apiKey).then(x=>{ if(ok) setFull(p=>({...p,
+      overview:x.overview||p.overview, genres:(x.genres||[]).map(g=>g.name),
+      runtime:x.runtime, seasons:x.number_of_seasons, totalEp:x.number_of_episodes })); }).catch(()=>{});
+    return ()=>{ok=false;};
+  },[item.tid]);
+  const tracked=data.movies.find(m=>m.tid===item.tid && m.kind===item.kind);
+  const base=()=>({tid:full.tid,kind:full.kind,title:full.title,image:full.image,score:full.score,
+    year:full.year,overview:full.overview,genres:full.genres,totalEp:full.totalEp});
+  const setStatus=status=>update(d=>{ const i=d.movies.findIndex(m=>m.tid===full.tid&&m.kind===full.kind);
+    if(i<0) d.movies.push({...base(),status,rating:null,progress:0,added:Date.now()}); else d.movies[i].status=status; });
+  const setRating=r=>update(d=>{ let i=d.movies.findIndex(m=>m.tid===full.tid&&m.kind===full.kind);
+    if(i<0){ d.movies.push({...base(),status:"watched",rating:null,progress:0,added:Date.now()}); i=d.movies.length-1; }
+    d.movies[i].rating=d.movies[i].rating===r?null:r; });
+  const setProg=p=>update(d=>{ let i=d.movies.findIndex(m=>m.tid===full.tid&&m.kind===full.kind);
+    if(i<0){ d.movies.push({...base(),status:"watching",rating:null,progress:0,added:Date.now()}); i=d.movies.length-1; }
+    d.movies[i].progress=Math.max(0,p); });
+  const remove=()=>update(d=>{ d.movies=d.movies.filter(m=>!(m.tid===full.tid&&m.kind===full.kind)); });
+  return (<div className="ovl" onClick={onClose}>
+    <div className="modal" onClick={e=>e.stopPropagation()}>
+      <div className="mh"><b>{full.title}</b><div className="grow"/><button className="ghost small" onClick={onClose}>close</button></div>
+      <div className="mc">
+        <div className="ahero"><img src={full.image} alt=""/>
+          <div className="meta">
+            <div className="sub">{[full.kind==="tv"?"Series":"Movie",full.year,full.runtime&&(full.runtime+" min"),
+              full.seasons&&(full.seasons+" seasons"),full.totalEp&&(full.totalEp+" episodes"),
+              full.score&&("\u2605 "+full.score)].filter(Boolean).join(DOT)}</div>
+            <div className="genres">{(full.genres||[]).map(g=><span className="tag" key={g}>{g}</span>)}</div>
+            {tracked && <div className="sub">In <b>{sName(tracked.status)}</b>
+              {tracked.rating&&<> {DOT} your rating <b>{tracked.rating}/10</b></>}
+              {full.kind==="tv"&&tracked.progress>0&&<> {DOT} watched <b>{tracked.progress}{full.totalEp?("/"+full.totalEp):""} ep</b></>}</div>}
+          </div></div>
+        <div className="acts">
+          {S_STATUS.map(([s,label])=>(<button key={s} className={"small"+(tracked?.status===s?"":" outline")} onClick={()=>setStatus(s)}>{label}</button>))}
+          {tracked && <button className="small ghost" onClick={remove}>remove</button>}
+        </div>
+        <div className="acts">
+          <span className="sub" style={{alignSelf:"center"}}>Rate:</span>
+          {[2,4,6,8,10].map(r=>(<button key={r} className={"small"+(tracked?.rating===r?"":" outline")} onClick={()=>setRating(r)}>{r}</button>))}
+          {full.kind==="tv" && <span className="row" style={{gap:6,marginLeft:8}}>
+            <span className="sub" style={{alignSelf:"center"}}>Episodes watched:</span>
+            <input type="number" min="0" style={{width:72}} value={tracked?.progress||0}
+              onChange={e=>setProg(Math.round(Number(e.target.value)||0))}/></span>}
+        </div>
+        <div className="syn">{full.overview||"No overview."}</div>
+      </div>
+    </div>
+  </div>);
+}
+
+/* ================= GAMES (RAWG) ================= */
+const G_STATUS=[["toplay","To play"],["playing","Playing"],["played","Played"],["dropped","Dropped"]];
+const gName=s=>(G_STATUS.find(x=>x[0]===s)||[,"\u2014"])[1];
+function GamesModule({data,update}){
+  const [tab,setTab]=useState("browse");
+  const [detail,setDetail]=useState(null);
+  const key=data.settings.rawgKey;
+  return (<div>
+    <Head title="Games" sub="Browse games, track your backlog, rate what you play."/>
+    <Tabs tabs={[["browse","Browse"],["library","My library ("+data.games.length+")"]]} tab={tab} set={setTab}/>
+    {!key && <div className="empty">Add a free <b>RAWG</b> API key in <b>Settings</b> to browse. Your saved library still works without it.</div>}
+    {tab==="browse" && <GameBrowse data={data} apiKey={key} onOpen={setDetail}/>}
+    {tab==="library" && <GameLibrary data={data} onOpen={setDetail}/>}
+    {detail && <GameDetail item={detail} data={data} update={update} apiKey={key} onClose={()=>setDetail(null)}/>}
+  </div>);
+}
+function GameBrowse({data,apiKey,onOpen}){
+  const [q,setQ]=useState(""); const [list,setList]=useState([]);
+  const [busy,setBusy]=useState(false); const [err,setErr]=useState("");
+  const run=async(query)=>{ if(!apiKey){setErr("Add a RAWG key in Settings.");return;}
+    setBusy(true);setErr("");setList([]);
+    try{ const path=query?("/games?search="+encodeURIComponent(query)+"&page_size=24")
+        :"/games?ordering=-added&page_size=24&dates=2022-01-01,2026-12-31";
+      const d=await rawg(path,apiKey); setList((d.results||[]).map(mapGame).filter(x=>x.image)); }
+    catch(ex){ setErr(ex.message==="BAD_KEY"?"That RAWG key was rejected (check Settings).":"Couldn't reach RAWG."); }
+    setBusy(false); };
+  useEffect(()=>{ if(apiKey) run(""); },[apiKey]);
+  const tracked=useMemo(()=>new Map(data.games.map(g=>[g.gid,g])),[data.games]);
+  const doSearch=e=>{e.preventDefault(); run(q);};
+  return (<div>
+    <div className="chips">
+      <form onSubmit={doSearch} className="row" style={{flex:1,minWidth:220}}>
+        <input style={{flex:1}} placeholder="Search games (blank = popular)..." value={q} onChange={e=>setQ(e.target.value)}/>
+        <button className="small">Search</button></form>
+    </div>
+    {err && <div className="empty">{err}</div>}
+    {busy ? <div className="spin">Loading from RAWG...</div>
+      : <div className="media">{list.map(a=>{ const t=tracked.get(a.gid);
+          return (<div className="mcard" key={a.gid} onClick={()=>onOpen(a)} title={a.title}>
+            <div className="cover" style={{backgroundImage:`url(${a.image||""})`}}>
+              {t && <span className="st">{gName(t.status)}</span>}
+              {a.metacritic?<span className="sc">{a.metacritic}</span>:(a.score?<span className="sc">{"\u2605 "+a.score}</span>:null)}
+            </div>
+            <div className="b"><div className="t">{a.title}</div>
+              <div className="m">{[a.year,(a.genres||[])[0]].filter(Boolean).join(DOT)}</div></div>
+          </div>); })}</div>}
+  </div>);
+}
+function GameLibrary({data,onOpen}){
+  const [status,setStatus]=useState("all");
+  let list=data.games; if(status!=="all") list=list.filter(g=>g.status===status);
+  const counts=Object.fromEntries(G_STATUS.map(([s])=>[s,data.games.filter(g=>g.status===s).length]));
+  return (<div>
+    <div className="chips">
+      <button className={"small"+(status==="all"?"":" outline")} onClick={()=>setStatus("all")}>All ({data.games.length})</button>
+      {G_STATUS.map(([s,label])=>(<button key={s} className={"small"+(status===s?"":" outline")} onClick={()=>setStatus(s)}>{label} ({counts[s]})</button>))}
+    </div>
+    {list.length===0 ? <div className="empty">Nothing saved yet. Open <b>Browse</b> and add a game.</div>
+      : <div className="media">{list.map(a=>(
+          <div className="mcard" key={a.gid} onClick={()=>onOpen(a)} title={a.title}>
+            <div className="cover" style={{backgroundImage:`url(${a.image||""})`}}>
+              <span className="st">{gName(a.status)}</span>
+              {a.rating?<span className="sc">{"\u2605 "+a.rating}</span>:null}</div>
+            <div className="b"><div className="t">{a.title}</div>
+              <div className="m">{[a.year,(a.genres||[])[0]].filter(Boolean).join(DOT)}</div></div>
+          </div>))}</div>}
+  </div>);
+}
+function GameDetail({item,data,update,apiKey,onClose}){
+  const [full,setFull]=useState(item);
+  useEffect(()=>{ let ok=true;
+    if(apiKey) rawg("/games/"+item.gid,apiKey).then(x=>{ if(ok) setFull(p=>({...p,
+      overview:(x.description_raw||"").slice(0,1200), genres:(x.genres||[]).map(g=>g.name),
+      platforms:(x.platforms||[]).map(pf=>pf.platform.name) })); }).catch(()=>{});
+    return ()=>{ok=false;};
+  },[item.gid]);
+  const tracked=data.games.find(g=>g.gid===item.gid);
+  const base=()=>({gid:full.gid,title:full.title,image:full.image,score:full.score,
+    metacritic:full.metacritic,year:full.year,genres:full.genres});
+  const setStatus=status=>update(d=>{ const i=d.games.findIndex(g=>g.gid===full.gid);
+    if(i<0) d.games.push({...base(),status,rating:null,added:Date.now()}); else d.games[i].status=status; });
+  const setRating=r=>update(d=>{ let i=d.games.findIndex(g=>g.gid===full.gid);
+    if(i<0){ d.games.push({...base(),status:"played",rating:null,added:Date.now()}); i=d.games.length-1; }
+    d.games[i].rating=d.games[i].rating===r?null:r; });
+  const remove=()=>update(d=>{ d.games=d.games.filter(g=>g.gid!==full.gid); });
+  return (<div className="ovl" onClick={onClose}>
+    <div className="modal" onClick={e=>e.stopPropagation()}>
+      <div className="mh"><b>{full.title}</b><div className="grow"/><button className="ghost small" onClick={onClose}>close</button></div>
+      <div className="mc">
+        <div className="ahero"><img src={full.image} alt=""/>
+          <div className="meta">
+            <div className="sub">{[full.year,full.metacritic&&("Metacritic "+full.metacritic),
+              full.score&&("\u2605 "+full.score)].filter(Boolean).join(DOT)}</div>
+            <div className="genres">{(full.genres||[]).map(g=><span className="tag" key={g}>{g}</span>)}</div>
+            {(full.platforms||[]).length>0 && <div className="sub">{full.platforms.slice(0,6).join(DOT)}</div>}
+            {tracked && <div className="sub">In <b>{gName(tracked.status)}</b>
+              {tracked.rating&&<> {DOT} your rating <b>{tracked.rating}/10</b></>}</div>}
+          </div></div>
+        <div className="acts">
+          {G_STATUS.map(([s,label])=>(<button key={s} className={"small"+(tracked?.status===s?"":" outline")} onClick={()=>setStatus(s)}>{label}</button>))}
+          {tracked && <button className="small ghost" onClick={remove}>remove</button>}
+        </div>
+        <div className="acts"><span className="sub" style={{alignSelf:"center"}}>Rate:</span>
+          {[2,4,6,8,10].map(r=>(<button key={r} className={"small"+(tracked?.rating===r?"":" outline")} onClick={()=>setRating(r)}>{r}</button>))}</div>
+        <div className="syn">{full.overview||"No description."}</div>
+      </div>
+    </div>
+  </div>);
+}
+
+/* ================= TO-DO & PLAN ================= */
+function TodoModule({data,update}){
+  const [text,setText]=useState(""); const [due,setDue]=useState(""); const [prio,setPrio]=useState("med");
+  const [filter,setFilter]=useState("active");
+  const add=e=>{ e.preventDefault(); if(!text.trim())return;
+    update(d=>d.todos.unshift({id:uid(),text:text.trim(),due,prio,done:false,added:Date.now()}));
+    setText(""); setDue(""); setPrio("med"); };
+  const toggle=id=>update(d=>{ const t=d.todos.find(x=>x.id===id); t.done=!t.done; });
+  const del=id=>update(d=>{ d.todos=d.todos.filter(x=>x.id!==id); });
+  let list=data.todos;
+  if(filter==="active") list=list.filter(t=>!t.done);
+  else if(filter==="done") list=list.filter(t=>t.done);
+  const order={high:0,med:1,low:2};
+  list=[...list].sort((a,b)=>(a.done-b.done)||((a.due||"zzzz").localeCompare(b.due||"zzzz"))||(order[a.prio]-order[b.prio]));
+  const active=data.todos.filter(t=>!t.done).length;
+  return (<div>
+    <Head title="To-do & Plan" sub={active+" open"+(active!==data.todos.length?(" of "+data.todos.length):"")}/>
+    <form className="row" onSubmit={add} style={{marginBottom:14,flexWrap:"wrap"}}>
+      <input style={{flex:2,minWidth:200}} placeholder="What needs doing?" value={text} onChange={e=>setText(e.target.value)}/>
+      <input type="date" value={due} onChange={e=>setDue(e.target.value)}/>
+      <select value={prio} onChange={e=>setPrio(e.target.value)}>
+        <option value="high">High</option><option value="med">Medium</option><option value="low">Low</option></select>
+      <button>Add</button></form>
+    <div className="chips">{[["active","Active"],["all","All"],["done","Done"]].map(([k,l])=>(
+      <button key={k} className={"small"+(filter===k?"":" outline")} onClick={()=>setFilter(k)}>{l}</button>))}</div>
+    {list.length===0 ? <div className="empty">Nothing here. Add your first task above.</div>
+      : <div className="txlist">{list.map(t=>(
+          <div className="tx" key={t.id}>
+            <div className="row" style={{gap:12}}>
+              <input type="checkbox" checked={t.done} onChange={()=>toggle(t.id)}/>
+              <span style={{fontWeight:600,textDecoration:t.done?"line-through":"none",opacity:t.done?0.55:1}}>{t.text}</span>
+              <span className="tag" style={{background:t.prio==="high"?"#f8717133":t.prio==="low"?"#9ca3af33":"#f59e0b33"}}>{t.prio}</span>
+            </div>
+            <div className="cat">{t.due||""}</div>
+            <span className="tag" onClick={()=>del(t.id)}>delete</span>
+          </div>))}</div>}
+  </div>);
+}
+
+/* ================= IDEAS ================= */
+function IdeasModule({data,update}){
+  const [open,setOpen]=useState(null);
+  const save=(idea)=>update(d=>{ if(idea.id){ const i=d.ideas.findIndex(x=>x.id===idea.id); d.ideas[i]=idea; }
+    else d.ideas.unshift({...idea,id:uid(),added:Date.now()}); });
+  const del=id=>update(d=>{ d.ideas=d.ideas.filter(x=>x.id!==id); });
+  const editing = open && open!=="new" ? data.ideas.find(x=>x.id===open) : null;
+  return (<div>
+    <Head title="Ideas" sub={data.ideas.length+" captured"}>
+      <button onClick={()=>setOpen("new")}>+ New idea</button></Head>
+    {data.ideas.length===0 ? <div className="empty">No ideas yet. Hit <b>+ New idea</b> to capture one.</div>
+      : <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(240px,1fr))",gap:14}}>{data.ideas.map(x=>(
+          <article className="card" key={x.id} style={{cursor:"pointer"}} onClick={()=>setOpen(x.id)}>
+            <h3 style={{margin:"0 0 6px"}}>{x.title||"Untitled"}</h3>
+            <div className="sub" style={{whiteSpace:"pre-wrap"}}>{(x.body||"").slice(0,180)}</div>
+            <div style={{marginTop:8}}>{(x.tags||[]).map(t=><span className="tag" key={t}>{t}</span>)}</div>
+          </article>))}</div>}
+    {(open==="new"||editing) && <IdeaEditor idea={editing} onClose={()=>setOpen(null)} onSave={save}
+      onDelete={editing?()=>{del(editing.id);setOpen(null);}:null}/>}
+  </div>);
+}
+function IdeaEditor({idea,onClose,onSave,onDelete}){
+  const [title,setTitle]=useState(idea?.title||"");
+  const [body,setBody]=useState(idea?.body||"");
+  const [tags,setTags]=useState((idea?.tags||[]).join(", "));
+  const save=()=>{ onSave({...(idea||{}),title:title.trim(),body,tags:tags.split(",").map(t=>t.trim()).filter(Boolean)}); onClose(); };
+  return (<div className="ovl" onClick={onClose}>
+    <div className="modal" onClick={e=>e.stopPropagation()}>
+      <div className="mh"><b>{idea?"Edit idea":"New idea"}</b><div className="grow"/><button className="ghost small" onClick={onClose}>close</button></div>
+      <div className="mc">
+        <Field label="Title"><input value={title} autoFocus onChange={e=>setTitle(e.target.value)}/></Field>
+        <Field label="Notes"><textarea rows={8} value={body} onChange={e=>setBody(e.target.value)}/></Field>
+        <Field label="Tags" hint="comma-separated"><input value={tags} onChange={e=>setTags(e.target.value)}/></Field>
+        <div className="acts"><button onClick={save}>Save</button>
+          {onDelete && <button className="ghost small" onClick={onDelete}>delete</button>}</div>
+      </div>
+    </div>
+  </div>);
+}
+
+/* ================= ML RESEARCH ================= */
+const ML_TYPES=["Paper","Concept","Project","Course"];
+const ML_STATUS=["Backlog","Studying","Done"];
+function MLModule({data,update}){
+  const [open,setOpen]=useState(null);
+  const [f,setF]=useState("all");
+  const save=(it)=>update(d=>{ if(it.id){ const i=d.mllog.findIndex(x=>x.id===it.id); d.mllog[i]=it; }
+    else d.mllog.unshift({...it,id:uid(),added:Date.now()}); });
+  const del=id=>update(d=>{ d.mllog=d.mllog.filter(x=>x.id!==id); });
+  const editing= open && open!=="new" ? data.mllog.find(x=>x.id===open):null;
+  let list=data.mllog; if(f!=="all") list=list.filter(x=>x.status===f);
+  return (<div>
+    <Head title="ML Research" sub={data.mllog.length+" entries"}>
+      <button onClick={()=>setOpen("new")}>+ Add entry</button></Head>
+    <div className="chips">{["all",...ML_STATUS].map(s=>(
+      <button key={s} className={"small"+(f===s?"":" outline")} onClick={()=>setF(s)}>{s==="all"?"All":s}</button>))}</div>
+    {list.length===0 ? <div className="empty">Nothing logged yet. Track papers, concepts, projects and courses here.</div>
+      : <div className="txlist">{list.map(x=>(
+          <div className="tx" key={x.id}>
+            <div className="row" style={{gap:12}}>
+              <span className="tag">{x.type}</span>
+              <span style={{fontWeight:600,cursor:"pointer"}} onClick={()=>setOpen(x.id)}>{x.title}</span>
+              {x.link && <a href={x.link} target="_blank" rel="noreferrer" className="sub">link</a>}
+            </div>
+            <div className="cat">{x.status}{x.date?(DOT+x.date):""}</div>
+            <span className="tag" onClick={()=>del(x.id)}>delete</span>
+          </div>))}</div>}
+    {(open==="new"||editing) && <MLEditor entry={editing} onClose={()=>setOpen(null)} onSave={save}/>}
+  </div>);
+}
+function MLEditor({entry,onClose,onSave}){
+  const [title,setTitle]=useState(entry?.title||"");
+  const [type,setType]=useState(entry?.type||"Paper");
+  const [status,setStatus]=useState(entry?.status||"Backlog");
+  const [link,setLink]=useState(entry?.link||"");
+  const [date,setDate]=useState(entry?.date||"");
+  const [notes,setNotes]=useState(entry?.notes||"");
+  const save=()=>{ if(!title.trim())return; onSave({...(entry||{}),title:title.trim(),type,status,link:link.trim(),date,notes}); onClose(); };
+  return (<div className="ovl" onClick={onClose}>
+    <div className="modal" onClick={e=>e.stopPropagation()}>
+      <div className="mh"><b>{entry?"Edit entry":"New entry"}</b><div className="grow"/><button className="ghost small" onClick={onClose}>close</button></div>
+      <div className="mc">
+        <Field label="Title"><input value={title} autoFocus onChange={e=>setTitle(e.target.value)}/></Field>
+        <div className="row" style={{flexWrap:"wrap"}}>
+          <Field label="Type"><select value={type} onChange={e=>setType(e.target.value)}>{ML_TYPES.map(t=><option key={t}>{t}</option>)}</select></Field>
+          <Field label="Status"><select value={status} onChange={e=>setStatus(e.target.value)}>{ML_STATUS.map(t=><option key={t}>{t}</option>)}</select></Field>
+          <Field label="Date"><input type="date" value={date} onChange={e=>setDate(e.target.value)}/></Field>
+        </div>
+        <Field label="Link" hint="arXiv, repo, course URL"><input value={link} onChange={e=>setLink(e.target.value)}/></Field>
+        <Field label="Notes"><textarea rows={6} value={notes} onChange={e=>setNotes(e.target.value)}/></Field>
+        <div className="acts"><button onClick={save}>Save</button></div>
+      </div>
+    </div>
+  </div>);
+}
+
+/* ================= SETTINGS ================= */
+function SettingsModule({data,update}){
+  const s=data.settings;
+  const set=(k,v)=>update(d=>{ d.settings[k]=v; });
+  return (<div>
+    <Head title="Settings" sub="API keys stay on this device (localStorage) and are never uploaded."/>
+    <article className="card" style={{marginBottom:16}}>
+      <h3 style={{marginTop:0}}>TMDB (Movies & TV)</h3>
+      <div className="sub" style={{marginBottom:8}}>Free key: sign up at themoviedb.org, then Settings {DOT} API {DOT} copy the <b>API Key (v3 auth)</b>.</div>
+      <Field label="TMDB API key"><input value={s.tmdbKey} placeholder="paste v3 key" onChange={e=>set("tmdbKey",e.target.value.trim())}/></Field>
+    </article>
+    <article className="card" style={{marginBottom:16}}>
+      <h3 style={{marginTop:0}}>RAWG (Games)</h3>
+      <div className="sub" style={{marginBottom:8}}>Free key: sign up at rawg.io/apidocs, copy your API key.</div>
+      <Field label="RAWG API key"><input value={s.rawgKey} placeholder="paste key" onChange={e=>set("rawgKey",e.target.value.trim())}/></Field>
+    </article>
+    <article className="card">
+      <h3 style={{marginTop:0}}>Data sources</h3>
+      <div className="sub">Anime & manga use <b>AniList</b> (no key needed). Movies & TV use <b>TMDB</b>. Games use <b>RAWG</b>. Finance, to-do, ideas and ML research are fully local to this browser.</div>
+    </article>
+  </div>);
+}
+
 /* ================= app shell ================= */
 function App(){
   const [data, update, setData] = useStore();
@@ -588,13 +1051,14 @@ function App(){
     case "dashboard": return <Dashboard data={data} go={setView}/>;
     case "anime": return <AnimeModule data={data} update={update}/>;
     case "manga": return <MangaModule data={data} update={update}/>;
-    case "movies": return <Soon label="Movies" note="Will use TMDB for posters & metadata."/>;
-    case "games": return <Soon label="Games" note="Will use RAWG for cover art & metadata."/>;
+    case "movies": return <MoviesModule data={data} update={update}/>;
+    case "games": return <GamesModule data={data} update={update}/>;
     case "finance": return <FinanceModule data={data} update={update}/>;
     case "investments": return <Investments data={data} update={update}/>;
-    case "todos": return <Soon label="To-do & Plan" note="Tasks, due dates, and a simple planner."/>;
-    case "ideas": return <Soon label="Ideas" note="Quick capture notes with tags."/>;
-    case "mllog": return <Soon label="ML Research" note="Log papers, topics, and progress."/>;
+    case "todos": return <TodoModule data={data} update={update}/>;
+    case "ideas": return <IdeasModule data={data} update={update}/>;
+    case "mllog": return <MLModule data={data} update={update}/>;
+    case "settings": return <SettingsModule data={data} update={update}/>;
     default: return null; } };
 
   return (<div data-sidebar-layout>
