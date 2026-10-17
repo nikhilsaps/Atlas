@@ -1,0 +1,77 @@
+/* Atlas theme: dark oat + violet accent + a few layout helpers.
+   oat ships a dark palette via light-dark(); forcing color-scheme:dark
+   switches every component to it, then we just nudge the accent + bg. */
+:root{
+  color-scheme: dark;
+  --primary: #6c8cff;
+  --primary-foreground: #ffffff;
+  --ring: #6c8cff;
+  --sidebar-width: 232px;
+  --radius: 12px;
+}
+body{
+  background:
+    radial-gradient(1100px 560px at 72% -12%, #1a2238 0, transparent 55%),
+    #0b0e14;
+  min-height:100vh;
+}
+/* brand */
+.brand{display:flex;align-items:center;gap:10px;padding:4px 6px 14px;font-size:19px;font-weight:700}
+.brand .logo{width:30px;height:30px;border-radius:9px;color:#fff;display:grid;place-items:center;
+  font-weight:800;background:linear-gradient(135deg,#6c8cff,#9a6cff)}
+.brand b{background:linear-gradient(90deg,#6c8cff,#9a6cff);-webkit-background-clip:text;
+  background-clip:text;color:transparent}
+aside[data-sidebar] nav .cnt{float:right;font-size:11px;opacity:.7}
+.navgrp{font-size:11px;text-transform:uppercase;letter-spacing:.1em;opacity:.5;margin:14px 10px 4px}
+.pagehead{display:flex;align-items:center;gap:14px;margin:4px 0 20px}
+.pagehead h1{margin:0}
+.pagehead .sub{color:var(--muted-foreground);font-size:13px}
+.grow{flex:1}
+/* stat cards */
+.statgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:14px}
+.stat .v{font-size:30px;font-weight:800;line-height:1.1;margin-top:4px}
+.stat .v small{font-size:13px;font-weight:600;color:var(--muted-foreground)}
+.stat .k{font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted-foreground)}
+/* media cards */
+.media{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:16px}
+.mcard{border:1px solid var(--border);border-radius:12px;overflow:hidden;cursor:pointer;
+  background:var(--card);transition:.15s}
+.mcard:hover{transform:translateY(-3px);border-color:var(--primary)}
+.mcard .cover{aspect-ratio:2/3;background:var(--muted) center/cover no-repeat;position:relative}
+.mcard .cover .st{position:absolute;top:7px;left:7px;font-size:10px;padding:2px 8px;border-radius:20px;
+  background:rgba(11,14,20,.82);border:1px solid var(--border)}
+.mcard .cover .sc{position:absolute;top:7px;right:7px;font-size:11px;font-weight:700;padding:2px 7px;
+  border-radius:20px;background:rgba(11,14,20,.85);color:#ffcc66}
+.mcard .b{padding:9px 10px}
+.mcard .t{font-size:13px;font-weight:600;line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;
+  -webkit-box-orient:vertical;overflow:hidden}
+.mcard .m{color:var(--muted-foreground);font-size:11px;margin-top:3px}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.chips{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:16px}
+.empty{color:var(--faint-foreground);text-align:center;padding:52px 20px;border:1px dashed var(--border);
+  border-radius:var(--radius)}
+.sr{display:grid;grid-template-columns:46px 1fr auto;gap:12px;align-items:center;padding:9px;border-radius:10px}
+.sr:hover{background:var(--muted)}
+.sr img{width:46px;height:66px;object-fit:cover;border-radius:6px;background:var(--muted)}
+.ovl{position:fixed;inset:0;background:rgba(5,7,12,.72);display:grid;place-items:center;z-index:60;padding:20px}
+.modal{background:var(--card);border:1px solid var(--border);border-radius:16px;width:min(680px,100%);
+  max-height:86vh;overflow:auto}
+.modal .mh{display:flex;align-items:center;gap:12px;padding:16px 18px;border-bottom:1px solid var(--border);
+  position:sticky;top:0;background:var(--card);z-index:1}
+.modal .mc{padding:18px}
+/* finance */
+.calc{display:grid;grid-template-columns:1fr 1fr;gap:20px}
+@media(max-width:760px){.calc{grid-template-columns:1fr}}
+.out{display:flex;flex-direction:column;gap:10px}
+.outrow{display:flex;justify-content:space-between;align-items:baseline;padding:9px 0;border-bottom:1px solid var(--border)}
+.outrow .lbl{color:var(--muted-foreground);font-size:13px}
+.outrow .num{font-size:19px;font-weight:700;font-variant-numeric:tabular-nums}
+.outrow.big .num{font-size:26px;color:var(--primary)}
+.txlist{display:flex;flex-direction:column;gap:2px;margin-top:6px}
+.tx{display:grid;grid-template-columns:1fr auto auto;gap:12px;align-items:center;padding:9px 10px;
+  border-radius:9px}
+.tx:hover{background:var(--muted)}
+.tx .amt{font-weight:700;font-variant-numeric:tabular-nums}
+.tx .cat{font-size:11px;color:var(--muted-foreground)}
+.tag{display:inline-block;font-size:10px;color:var(--muted-foreground);background:var(--muted);
+  border:1px solid var(--border);padding:1px 7px;border-radius:20px;margin:3px 3px 0 0;cursor:pointer}
