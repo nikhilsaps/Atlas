@@ -75,15 +75,15 @@ function curSeason(){ const m=new Date().getMonth(), y=new Date().getFullYear();
   if(m<=4) return {season:"SPRING", year:y};
   if(m<=7) return {season:"SUMMER", year:y};
   return {season:"FALL", year:y}; }
-async function fetchTop(){
-  const d=await alQuery(`query{Page(perPage:24){media(type:ANIME,sort:SCORE_DESC){${MEDIA_FIELDS}}}}`,{});
-  return d.Page.media.map(mapAnime); }
-async function fetchSeason(){ const {season,year}=curSeason();
-  const d=await alQuery(`query($s:MediaSeason,$y:Int){Page(perPage:24){media(type:ANIME,season:$s,seasonYear:$y,sort:POPULARITY_DESC){${MEDIA_FIELDS}}}}`,{s:season,y:year});
-  return d.Page.media.map(mapAnime); }
-async function fetchSearch(q){
-  const d=await alQuery(`query($q:String){Page(perPage:24){media(type:ANIME,search:$q,sort:SEARCH_MATCH){${MEDIA_FIELDS}}}}`,{q});
-  return d.Page.media.map(mapAnime); }
+async function fetchTop(page=1){
+  const d=await alQuery(`query($p:Int){Page(page:$p,perPage:24){pageInfo{hasNextPage} media(type:ANIME,sort:SCORE_DESC){${MEDIA_FIELDS}}}}`,{p:page});
+  return {items:d.Page.media.map(mapAnime), more:d.Page.pageInfo.hasNextPage}; }
+async function fetchSeason(page=1){ const {season,year}=curSeason();
+  const d=await alQuery(`query($s:MediaSeason,$y:Int,$p:Int){Page(page:$p,perPage:24){pageInfo{hasNextPage} media(type:ANIME,season:$s,seasonYear:$y,sort:POPULARITY_DESC){${MEDIA_FIELDS}}}}`,{s:season,y:year,p:page});
+  return {items:d.Page.media.map(mapAnime), more:d.Page.pageInfo.hasNextPage}; }
+async function fetchSearch(q,page=1){
+  const d=await alQuery(`query($q:String,$p:Int){Page(page:$p,perPage:24){pageInfo{hasNextPage} media(type:ANIME,search:$q,sort:SEARCH_MATCH){${MEDIA_FIELDS}}}}`,{q,p:page});
+  return {items:d.Page.media.map(mapAnime), more:d.Page.pageInfo.hasNextPage}; }
 async function fetchFull(id){
   const d=await alQuery(`query($id:Int){Media(id:$id,type:ANIME){${MEDIA_FIELDS} duration status}}`,{id});
   return mapAnime(d.Media); }
@@ -189,22 +189,31 @@ function AnimeModule({data, update}){
 function AnimeBrowse({data, onOpen}){
   const [src,setSrc] = useState("season");
   const [q,setQ] = useState("");
+  const [cur,setCur] = useState({which:"season",query:""});
   const [list,setList] = useState([]);
+  const [page,setPage] = useState(1);
+  const [more,setMore] = useState(false);
   const [busy,setBusy] = useState(false);
+  const [mbusy,setMbusy] = useState(false);
   const [err,setErr] = useState("");
-  const run = async (which, query)=>{
-    setBusy(true); setErr(""); setList([]);
+  const load = async (which, query, pg)=>{
+    const first = pg===1;
+    if(first){ setBusy(true); setList([]); setCur({which,query}); } else setMbusy(true);
+    setErr("");
     try{
-      if(which==="top") setList(await fetchTop());
-      else if(which==="season") setList(await fetchSeason());
-      else setList(await fetchSearch(query));
-    }catch(ex){ setErr("Couldn't reach AniList (need internet to browse)."); }
-    setBusy(false);
+      let r;
+      if(which==="top") r=await fetchTop(pg);
+      else if(which==="season") r=await fetchSeason(pg);
+      else r=await fetchSearch(query, pg);
+      setList(prev=> first ? r.items : [...prev, ...r.items.filter(x=>!prev.some(p=>p.mal===x.mal))]);
+      setMore(r.more); setPage(pg);
+    }catch(ex){ setErr(first?"Couldn't reach AniList (need internet to browse).":"Couldn't load more."); }
+    setBusy(false); setMbusy(false);
   };
-  useEffect(()=>{ run("season"); },[]);
+  useEffect(()=>{ load("season","",1); },[]);
   const tracked = useMemo(()=> new Map(data.anime.map(a=>[a.mal,a])), [data.anime]);
-  const pick = (s)=>{ setSrc(s); if(s!=="search") run(s); };
-  const doSearch = (e)=>{ e.preventDefault(); if(!q.trim())return; setSrc("search"); run("search",q); };
+  const pick = (s)=>{ setSrc(s); if(s!=="search") load(s,"",1); };
+  const doSearch = (e)=>{ e.preventDefault(); if(!q.trim())return; setSrc("search"); load("search",q,1); };
   return (<div>
     <div className="chips">
       <button className={"small"+(src==="season"?"":" outline")} onClick={()=>pick("season")}>This season</button>
@@ -217,7 +226,8 @@ function AnimeBrowse({data, onOpen}){
     </div>
     {err && <div className="empty">{err}</div>}
     {busy ? <div className="spin">Loading from AniList...</div>
-      : <div className="media">{list.map(a=>{ const t=tracked.get(a.mal);
+      : <>
+        <div className="media">{list.map(a=>{ const t=tracked.get(a.mal);
           return (<div className="mcard" key={a.mal} onClick={()=>onOpen(a)} title={a.title}>
             <div className="cover" style={{backgroundImage:`url(${a.image||""})`}}>
               {t && <span className="st">{statusName(t.status)}</span>}
@@ -226,7 +236,13 @@ function AnimeBrowse({data, onOpen}){
             </div>
             <div className="b"><div className="t">{a.title}</div>
               <div className="m">{[a.year,a.type,a.episodes&&(a.episodes+" ep")].filter(Boolean).join(DOT)}</div></div>
-          </div>); })}</div>}
+          </div>); })}</div>
+        {list.length>0 && <div className="loadmore">
+          <span className="sub">{list.length} shown</span>
+          {more && <button className="outline small" disabled={mbusy}
+            onClick={()=>load(cur.which,cur.query,page+1)}>{mbusy?"Loading...":"Load more"}</button>}
+        </div>}
+      </>}
   </div>);
 }
 
@@ -651,22 +667,26 @@ function MoviesModule({data,update}){
 }
 function ScreenBrowse({data,apiKey,onOpen}){
   const [src,setSrc]=useState("movie");
-  const [q,setQ]=useState(""); const [list,setList]=useState([]);
-  const [busy,setBusy]=useState(false); const [err,setErr]=useState("");
-  const run=async(which,query)=>{ if(!apiKey){setErr("Add a TMDB key in Settings.");return;}
-    setBusy(true);setErr("");setList([]);
+  const [q,setQ]=useState("");
+  const [cur,setCur]=useState({which:"movie",query:""});
+  const [list,setList]=useState([]);
+  const [page,setPage]=useState(1); const [more,setMore]=useState(false);
+  const [busy,setBusy]=useState(false); const [mbusy,setMbusy]=useState(false); const [err,setErr]=useState("");
+  const load=async(which,query,pg)=>{ if(!apiKey){setErr("Add a TMDB key in Settings.");return;}
+    const first=pg===1; if(first){setBusy(true);setList([]);setCur({which,query});} else setMbusy(true); setErr("");
     try{ let d;
-      if(which==="movie") d=await tmdb("/movie/popular",apiKey);
-      else if(which==="tv") d=await tmdb("/tv/popular",apiKey);
-      else d=await tmdb("/search/multi?query="+encodeURIComponent(query),apiKey);
-      const items=(d.results||[]).filter(x=>x.media_type!=="person").map(x=>mapScreen(x,which==="search"?null:which));
-      setList(items.filter(x=>x.image));
+      if(which==="movie") d=await tmdb("/movie/popular?page="+pg,apiKey);
+      else if(which==="tv") d=await tmdb("/tv/popular?page="+pg,apiKey);
+      else d=await tmdb("/search/multi?page="+pg+"&query="+encodeURIComponent(query),apiKey);
+      const items=(d.results||[]).filter(x=>x.media_type!=="person").map(x=>mapScreen(x,which==="search"?null:which)).filter(x=>x.image);
+      setList(prev=> first?items:[...prev,...items.filter(x=>!prev.some(p=>p.kind+p.tid===x.kind+x.tid))]);
+      setMore((d.page||pg)<(d.total_pages||pg)); setPage(pg);
     }catch(ex){ setErr(ex.message==="BAD_KEY"?"That TMDB key was rejected (check Settings).":"Couldn't reach TMDB."); }
-    setBusy(false); };
-  useEffect(()=>{ if(apiKey) run("movie"); },[apiKey]);
+    setBusy(false); setMbusy(false); };
+  useEffect(()=>{ if(apiKey) load("movie","",1); },[apiKey]);
   const tracked=useMemo(()=>new Map(data.movies.map(m=>[m.kind+m.tid,m])),[data.movies]);
-  const pick=s=>{setSrc(s); run(s);};
-  const doSearch=e=>{e.preventDefault(); if(!q.trim())return; setSrc("search"); run("search",q);};
+  const pick=s=>{setSrc(s); load(s,"",1);};
+  const doSearch=e=>{e.preventDefault(); if(!q.trim())return; setSrc("search"); load("search",q,1);};
   return (<div>
     <div className="chips">
       <button className={"small"+(src==="movie"?"":" outline")} onClick={()=>pick("movie")}>Popular movies</button>
@@ -677,7 +697,8 @@ function ScreenBrowse({data,apiKey,onOpen}){
     </div>
     {err && <div className="empty">{err}</div>}
     {busy ? <div className="spin">Loading from TMDB...</div>
-      : <div className="media">{list.map(a=>{ const t=tracked.get(a.kind+a.tid);
+      : <>
+        <div className="media">{list.map(a=>{ const t=tracked.get(a.kind+a.tid);
           return (<div className="mcard" key={a.kind+a.tid} onClick={()=>onOpen(a)} title={a.title}>
             <div className="cover" style={{backgroundImage:`url(${a.image||""})`}}>
               {t && <span className="st">{sName(t.status)}</span>}
@@ -686,7 +707,13 @@ function ScreenBrowse({data,apiKey,onOpen}){
             </div>
             <div className="b"><div className="t">{a.title}</div>
               <div className="m">{[a.year,a.kind==="tv"?"Series":"Movie"].filter(Boolean).join(DOT)}</div></div>
-          </div>); })}</div>}
+          </div>); })}</div>
+        {list.length>0 && <div className="loadmore">
+          <span className="sub">{list.length} shown</span>
+          {more && <button className="outline small" disabled={mbusy}
+            onClick={()=>load(cur.which,cur.query,page+1)}>{mbusy?"Loading...":"Load more"}</button>}
+        </div>}
+      </>}
   </div>);
 }
 function ScreenLibrary({data,onOpen}){
@@ -779,18 +806,23 @@ function GamesModule({data,update}){
   </div>);
 }
 function GameBrowse({data,apiKey,onOpen}){
-  const [q,setQ]=useState(""); const [list,setList]=useState([]);
-  const [busy,setBusy]=useState(false); const [err,setErr]=useState("");
-  const run=async(query)=>{ if(!apiKey){setErr("Add a RAWG key in Settings.");return;}
-    setBusy(true);setErr("");setList([]);
-    try{ const path=query?("/games?search="+encodeURIComponent(query)+"&page_size=24")
-        :"/games?ordering=-added&page_size=24&dates=2022-01-01,2026-12-31";
-      const d=await rawg(path,apiKey); setList((d.results||[]).map(mapGame).filter(x=>x.image)); }
-    catch(ex){ setErr(ex.message==="BAD_KEY"?"That RAWG key was rejected (check Settings).":"Couldn't reach RAWG."); }
-    setBusy(false); };
-  useEffect(()=>{ if(apiKey) run(""); },[apiKey]);
+  const [q,setQ]=useState("");
+  const [cur,setCur]=useState("");
+  const [list,setList]=useState([]);
+  const [page,setPage]=useState(1); const [more,setMore]=useState(false);
+  const [busy,setBusy]=useState(false); const [mbusy,setMbusy]=useState(false); const [err,setErr]=useState("");
+  const load=async(query,pg)=>{ if(!apiKey){setErr("Add a RAWG key in Settings.");return;}
+    const first=pg===1; if(first){setBusy(true);setList([]);setCur(query);} else setMbusy(true); setErr("");
+    try{ const base=query?("/games?search="+encodeURIComponent(query)):"/games?ordering=-added&dates=2022-01-01,2026-12-31";
+      const d=await rawg(base+"&page_size=24&page="+pg,apiKey);
+      const items=(d.results||[]).map(mapGame).filter(x=>x.image);
+      setList(prev=> first?items:[...prev,...items.filter(x=>!prev.some(p=>p.gid===x.gid))]);
+      setMore(!!d.next); setPage(pg);
+    }catch(ex){ setErr(ex.message==="BAD_KEY"?"That RAWG key was rejected (check Settings).":"Couldn't reach RAWG."); }
+    setBusy(false); setMbusy(false); };
+  useEffect(()=>{ if(apiKey) load("",1); },[apiKey]);
   const tracked=useMemo(()=>new Map(data.games.map(g=>[g.gid,g])),[data.games]);
-  const doSearch=e=>{e.preventDefault(); run(q);};
+  const doSearch=e=>{e.preventDefault(); load(q,1);};
   return (<div>
     <div className="chips">
       <form onSubmit={doSearch} className="row" style={{flex:1,minWidth:220}}>
@@ -799,7 +831,8 @@ function GameBrowse({data,apiKey,onOpen}){
     </div>
     {err && <div className="empty">{err}</div>}
     {busy ? <div className="spin">Loading from RAWG...</div>
-      : <div className="media">{list.map(a=>{ const t=tracked.get(a.gid);
+      : <>
+        <div className="media">{list.map(a=>{ const t=tracked.get(a.gid);
           return (<div className="mcard" key={a.gid} onClick={()=>onOpen(a)} title={a.title}>
             <div className="cover" style={{backgroundImage:`url(${a.image||""})`}}>
               {t && <span className="st">{gName(t.status)}</span>}
@@ -807,7 +840,13 @@ function GameBrowse({data,apiKey,onOpen}){
             </div>
             <div className="b"><div className="t">{a.title}</div>
               <div className="m">{[a.year,(a.genres||[])[0]].filter(Boolean).join(DOT)}</div></div>
-          </div>); })}</div>}
+          </div>); })}</div>
+        {list.length>0 && <div className="loadmore">
+          <span className="sub">{list.length} shown</span>
+          {more && <button className="outline small" disabled={mbusy}
+            onClick={()=>load(cur,page+1)}>{mbusy?"Loading...":"Load more"}</button>}
+        </div>}
+      </>}
   </div>);
 }
 function GameLibrary({data,onOpen}){
