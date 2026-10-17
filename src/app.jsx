@@ -1,4 +1,4 @@
-const { useState, useEffect, useMemo } = React;
+import React, { useState, useEffect, useMemo } from "react";
 
 /* ================= data store: one JSON blob in localStorage ================= */
 const KEY = "atlas.data.v1";
@@ -503,4 +503,4 @@ function App(){
   </div>);
 }
 
-ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+export default App;

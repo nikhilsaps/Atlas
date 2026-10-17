@@ -1,0 +1,20 @@
+{
+  "name": "atlas",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Personal life-OS: library (anime/manga/movies/games) + finance, investments and planning. Local-first, static build for SD-card serving.",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "vite": "^5.4.11"
+  }
+}

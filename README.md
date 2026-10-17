@@ -14,34 +14,46 @@ ML-research progress. Local-first, data stored as a single JSON blob.
   (`atlas.data.v1`) and can be exported / imported as a `.json` file. No server,
   no account, no cloud.
 - **UI.** Semantic HTML styled by **oat** (knadh/oat, vendored in `vendor/`),
-  dark theme with a violet accent in `theme.css`. No build step, no framework CSS.
+  dark theme with a violet accent in `theme.css`.
+- **Build.** Vite + React. `npm run build` emits a self-contained static bundle
+  to `dist/` (hashed, minified, no CDN) with relative asset paths, so it serves
+  from any folder on the SD card.
 - **Auto metadata.** Adding anime/manga searches **Jikan** (the free MyAnimeList
   API, no key) and pulls cover art, score, year, episode/chapter count and
   synopsis. Movies will use **TMDB**, games **RAWG** (both free). These run in
   the browser and only need internet at the moment you search.
 
-## Run it
+## Develop & build
 
-Any static server works (the app is plain static files):
+Vite + React project. Requires Node (built with Node 26 / npm 11).
 
 ```sh
 cd Atlas
-python -m http.server 8000
-# open http://localhost:8000/
+npm install        # one time
+npm run dev        # local dev server with hot reload -> http://localhost:5173
+npm run build      # production bundle -> dist/
+npm run preview    # serve the built dist/ to sanity-check
 ```
 
-## ESP32 / Cardputer note
+`npm run build` is the artifact. Everything in `dist/` is static and
+self-contained (React is bundled in, oat and theme are inlined, asset URLs are
+relative), so it needs no server logic and no internet to load.
 
-The app is static files, so it can be served off a microSD by the Nexus
-LocalServe host. Two things to finish for true on-device use:
+## ESP32 / Cardputer (SD card)
 
-1. **Vendor the libraries.** The prototype loads React + Babel from a CDN
-   (`index.html`), which needs internet the first time. The ship build will
-   either (a) run a Vite production build and serve the vendored bundle, or
-   (b) switch to Preact + htm (~10 KB, no build step) placed in `vendor/`.
-2. **Persist to the card.** Instead of only `localStorage`, write the JSON back
-   to the SD through LocalServe's save API (`PUT /api/save/atlas.json`) so the
-   data lives on the card and survives a browser wipe.
+The device just serves files, so deploying is a copy:
+
+1. `npm run build`
+2. Copy the **contents of `dist/`** into the Nexus sites folder for Atlas
+   (e.g. `sd_root/sites/atlas/`) and let the LocalServe host serve it.
+
+Still browser-only: the anime/manga metadata lookups (Jikan) and the planned
+Movies (TMDB) / Games (RAWG) need internet *at search time*; everything else,
+including all finance maths, runs offline.
+
+**Data persistence.** Today state lives in `localStorage` with JSON
+export/import. The on-device step is to write the JSON back to the card via
+LocalServe's save API (`PUT /api/save/atlas.json`) so it survives a browser wipe.
 
 ## Status
 
