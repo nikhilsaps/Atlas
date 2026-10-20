@@ -14,14 +14,17 @@ ML-research progress. Local-first, data stored as a single JSON blob.
   (`atlas.data.v1`) and can be exported / imported as a `.json` file. No server,
   no account, no cloud.
 - **UI.** Semantic HTML styled by **oat** (knadh/oat, vendored in `vendor/`),
-  dark theme with a violet accent in `theme.css`.
+  light theme by default with a dark toggle and a violet accent, in
+  `theme.css`. On phones the sidebar folds into an off-canvas drawer
+  (hamburger + backdrop) for an app-like layout; desktop keeps the
+  collapsible sidebar.
 - **Build.** Vite + React. `npm run build` emits a self-contained static bundle
   to `dist/` (hashed, minified, no CDN) with relative asset paths, so it serves
   from any folder on the SD card.
-- **Auto metadata.** Adding anime/manga searches **Jikan** (the free MyAnimeList
-  API, no key) and pulls cover art, score, year, episode/chapter count and
-  synopsis. Movies will use **TMDB**, games **RAWG** (both free). These run in
-  the browser and only need internet at the moment you search.
+- **Auto metadata.** Adding a title pulls cover art, score, year, counts and
+  synopsis automatically: anime/manga from **AniList** (GraphQL, no key),
+  movies from **TMDB**, games from **RAWG**. These run in the browser and only
+  need internet at the moment you search.
 
 ## Develop & build
 
@@ -57,8 +60,11 @@ LocalServe's save API (`PUT /api/save/atlas.json`) so it survives a browser wipe
 
 ## Status
 
-Built: shell, dark oat UI, Dashboard, Anime + Manga (search, metadata, add,
-status, filter, remove), JSON export/import, and the full **Finance** module:
+Built: the shell (light/dark oat UI, collapsible sidebar, mobile off-canvas
+drawer) and **every module** - Dashboard, Anime, Manga, Movies, Games,
+Finance, Investments, To-do, Ideas and ML Research - plus JSON export/import.
+Anime/manga metadata comes from AniList, movies from TMDB, games from RAWG.
+The full **Finance** module:
 
 - **Expenses** - log amount / category / note / date; monthly total, all-time
   total and a this-month by-category breakdown.
@@ -77,5 +83,5 @@ portfolio-wide profit/loss and return %.
 All finance maths run locally in the browser; INR is formatted with
 `Intl.NumberFormat('en-IN')`.
 
-Next: Movies (TMDB), Games (RAWG), To-do/planner, Ideas, ML-research log;
-persist JSON to SD via LocalServe.
+Next: persist the JSON blob to the SD card via LocalServe's save API
+(`PUT /api/save/atlas.json`) so it survives a browser wipe.

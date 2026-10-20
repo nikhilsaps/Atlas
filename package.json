@@ -5,6 +5,7 @@
   "type": "module",
   "description": "Personal life-OS: library (anime/manga/movies/games) + finance, investments and planning. Local-first, static build for SD-card serving.",
   "scripts": {
+    "start": "vite",
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview"
